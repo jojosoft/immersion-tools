@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# record-anki-audio - Record audio asynchronously and import it into Anki.
+# Copyright (C) 2020 Johannes Schirm
+
+# This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Requires sox, xclip and bc to be installed on the system.
+# If you are not on KDE, replace kdialog commands with your preference.
+# Please change at least $COLLECTION to point to your Anki collection.
+
+# When executed, the script will use sox to record an audio source.
+# When executed again, the script will stop the recording and export it.
+# It will be saved as a 128k MP3 file and moved to your Anki collection.
+# Finally, "[sound:filename.mp3]" will be copied to your clipboard.
+# (Ready for pasting it directly into the audio field on an Anki card.)
+
+# To setup this script to record the correct source, execute it once.
+# Then set the desired source in the PulseAudio control panel for sox.
+# Execute the script once more to stop the test recording again.
+# PulseAudio should now always provide the desired source to sox.
+# If you are not using PulseAudio, specifiy the desired ALSA device.
+# (You will have to look up the syntax of the rec command to do this.)
+
+# The minimum required length of a recording in milliseconds.
+# Stopping the recording will not possible before this time passed.
+# Also the duration that the script will block after a recording.
+# Both is to prevent problems due to long or repeated key presses.
+MIN_TIME_MS=1000
+WARN_TIME_S=60
+COLLECTION='/home/johannes/.local/share/Anki2/日本語/collection.media/'
+TMP_AUDIO='/tmp/ankiAudioRecording.mp3'
+TMP_PID='/tmp/ankiAudioRecordingPID'
+TMP_TIME='/tmp/ankiAudioRecordingStartTime'
+
+function getTimeMs {
+	# Returns the milliseconds since the start of the UNIX epoch.
+	echo $(( $(date +%s%N) / 1000000 ))
+}
+function getRecordTimeMs {
+	# Returns the milliseconds since the last recording started.
+	# If no recording is active, -1 is returned instead.
+	if [[ -f "$TMP_TIME" ]]
+	then
+		echo $(( $(getTimeMs) - "$(cat "$TMP_TIME")" ))
+	else
+		echo "-1"
+	fi
+}
+function msToS {
+	# Converts milliseconds (argument 1) to seconds.
+	# Decimal places (argument 2) can be specified optionally.
+	# (Note that no rounding is performed, just truncation.)
+	dPlaces=0
+	if [[ ! -z "$2" && "2" =~ ^[0-9]+$ ]]
+	then
+		dPlaces=$2
+	fi
+	echo $(bc <<< "scale=$dPlaces; $1/1000")
+}
+function recordingWarning {
+	# Warns the user after $WARN_TIME_S seconds of recording.
+	# This is needed in case the user hits the shortcut too often.
+	# This function should be run in the background using &.
+	# It will terminate automatically if no longer needed.
+	# (The recording ended or another (different PID) started.)
+	# Please make sure to run this after the PID was written.
+	startPID=$(cat "$TMP_PID")
+	sleep "$WARN_TIME_S"
+	currentPID=-1
+	if [[ -f "$TMP_PID" ]]
+	then
+		currentPID=$(cat "$TMP_PID")
+	fi
+	if [[ $(getRecordTimeMs) -gt -1 && "$currentPID" -eq "$startPID" ]]
+	then
+		# The recoding is still running, warn the user!
+		kdialog --passivepopup "An audio recording runs since $WARN_TIME_S seconds."
+	fi
+}
+
+
+if [[ -f "$TMP_PID" ]]
+then
+	# Record at least MIN_TIME_MS milliseconds of audio.
+	# (Avoiding repeated execution for longer shortcut presses.)
+	if [[ $(getRecordTimeMs) -lt "$MIN_TIME_MS" ]]
+	then
+		kdialog --passivepopup "The audio recording state has not been altered."
+		exit
+	fi
+	# Block further executions of this script by updating the start time:
+	getTimeMs > "$TMP_TIME"
+	# Stop the recording process:
+	kill -s TERM $(cat "$TMP_PID")
+	# Wait for the output audio file to be closed.
+	while [[ ! -z "$(lsof "$TMP_AUDIO" 2> /dev/null)" ]]
+	do
+		sleep 0.1
+	done
+	# Copy the MP3 file into Anki's media collection:
+	cd "$COLLECTION"
+	filename="$(date +"recording-%Y%m%d%H%M%S%z").mp3"
+	mv "$TMP_AUDIO" "$filename"
+	# Copy the sound snippet to the clipboard:
+	echo -n "[sound:$filename]" | xclip -sel clip
+	# Now reset the start time again and wait for the minimum time to pass.
+	getTimeMs > "$TMP_TIME"
+	sleep $(msToS "$MIN_TIME_MS" 2)
+	# Finally, remove the PID and time file for the next recordings.
+	rm "$TMP_PID"
+	rm "$TMP_TIME"
+else
+	# Start the recording and store the PID:
+	# (ffmpeg + pulse doesn't work any more! Only sox with configured default in pavucontrol survives reboot.)
+	#ffmpeg -y -f pulse -i alsa_output.pci-0000_00_1b.0.analog-stereo.monitor -b:a 128k "$TMP_AUDIO" &
+	rec -c 2 -r 44100 "$TMP_AUDIO" &
+	echo $! > "$TMP_PID"
+	# Save the start time of this recording. The file creation date might be not precise enough.
+	getTimeMs > "$TMP_TIME"
+	# Finally, start the warning background process to avoid accidental hour-long recordings...
+	recordingWarning &
+fi
