@@ -1,0 +1,151 @@
+#!/bin/bash
+
+# get-switch-media - transfer captured media from the Nintendo Switch via MTP.
+# Copyright (C) 2020 Johannes Schirm
+
+# This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Requires jmtpfs, rename and find to be installed on the system.
+# MTP protocol is used for the transfer, run this server on the Switch:
+# https://github.com/retronx-team/mtp-server-nx
+# (It is homebrew, jailbreaking your Switch is necessary to run it!)
+# Make sure to adjust $IMPORT_PATH and $IMPORT_USER appropriately.
+# Also check $ALBUM_PATH, emuNAND systems put data into emuMMC/*.
+# (Take a screenshot and see which Nintendo/Album folder holds it.)
+# Make sure that the script has permissions to create $TMP_PATH.
+
+# Connect your Nintendo Switch and make sure the connection is stable.
+# On my laptop, it often fluctuates, indicated by the charging status.
+# In this case, I plug it out and in again until it remains stable.
+# (It might be my kernel, the MTP server or a loose connection..?)
+# Then start the MTP server, it will offer an MTP device to the host.
+# You could have systemd run this script whenever this happens...
+# This script will automatically choose the first MTP device.
+# Make sure to have no other MTP devices connected at the same time!
+
+# Final path where the imported media will be expected by the user.
+IMPORT_PATH="/home/johannes/ピクチャ/Screenshots/"
+# Final file owner is necessary. (For times when root runs the script.)
+IMPORT_USER="johannes"
+# Path to the Nintendo Switch Album on your Switch's SD card.
+ALBUM_PATH="emuMMC/RAW1/Nintendo/Album"
+# The probe file keeps the last sync time, so we only copy new media.
+# It also makes sure that we are using the correct MTP device.
+# (This parameter just changes the name, it is created automatically!)
+PROBE_NAME=".lastScreenshotSync"
+# A temporary directory for the transfer that does not exist yet.
+TMP_PATH="/tmp/switchTransfer/"
+# The number of days that media should remain on your Switch.
+# Older media will be automatically deleted after syncing.
+# (Make sure to correctly set date and time on your Switch.)
+# Provide a negative value here to disable this feature.
+KEEP_DAYS=90
+
+
+# Mount the first MTP device available.
+mkdir "$TMP_PATH"
+cd "$TMP_PATH"
+mkdir MTPMount
+if ! jmtpfs MTPMount
+then
+	echo "No MTP devices found, exiting."
+	rmdir MTPMount
+	cd ..
+	rmdir "$TMP_PATH"
+	exit 1
+else
+	echo "Successfully mounted MTP device."
+fi
+# Check if the probe file already exists.
+# (Only copy files newer than the date in this file.)
+PROBE_PATH="MTPMount/sdcard/$ALBUM_PATH/$PROBE_NAME"
+if [[ ! -f "$PROBE_PATH" ]]
+then
+	# When first creating the probe file, write the earliest date possible.
+	echo $(date -d @0 '+%Y%m%d%H%M.%S') > "$PROBE_PATH"
+	echo "No previous syncs detected, created $PROBE_PATH."
+fi
+# Timestamps via MTP have a tendency to suck, create an intermediate file.
+# (find can only compare mtime to other files, not given timestamps?!)
+touch -t $(cat "$PROBE_PATH") .syncReference
+# Now copy all files modified since the last sync.
+newFiles=$(find "MTPMount/sdcard/$ALBUM_PATH" \
+	-type f -newer .syncReference \
+	\( -iname \*.jpg -o -iname \*.mp4 \))
+copied=0
+fails=0
+for file in $newFiles
+do
+	# Sometimes MTP can be really unstable, try several times if needed.
+	try=0
+	while ! cp "$file" .
+	do
+		let try=try+1
+		if [[ "$try" -eq 3 ]]
+		then
+			# Only give this file up after three failures.
+			echo "Failed repeatedly to copy ${file##*/}."
+			let fails=fails+1
+			break
+		fi
+		# To be safe, leave some time between tries!
+		sleep 3
+	done
+	if [[ "$try" -lt 3 ]]
+	then
+		# Update the file's modification time for correct ordering.
+		touch "${file##*/}"
+		# Only count files which have been copied successfully.
+		let copied=copied+1
+	fi
+done
+if [[ "$copied" > 0 ]]
+then
+	echo "Successfully copied $copied new files."
+fi
+if [[ "$fails" > 0 ]]
+then
+	echo "$fails files could not be copied even after retrying."
+fi
+# The intermediate file can now be deleted.
+rm .syncReference
+# If requested, delete files older than $KEEP_DAYS from the Switch.
+if [[ "$KEEP_DAYS" -ge 0 ]]
+then
+	oldFiles=$(find "MTPMount/sdcard/$ALBUM_PATH" \
+		-type f -mtime +"$KEEP_DAYS" \
+		\( -iname \*.jpg -o -iname \*.mp4 \) \
+		-delete -print)
+fi
+if [[ ! -z "$oldFiles" ]]
+then
+	echo "Deleted $(echo "$oldFiles" | wc -l) old files from device."
+fi
+# To keep the filesystem clean, delete empty directories from the Switch.
+oldFolders=$(find "MTPMount/sdcard/$ALBUM_PATH" \
+	-type d -empty \
+	-delete -print)
+if [[ ! -z "$oldFolders" ]]
+then
+	echo "Deleted $(echo "$oldFolders" | wc -l) old folders from device."
+fi
+# Now, we can update the date in the probe file.
+echo $(date '+%Y%m%d%H%M.%S') > "$PROBE_PATH"
+# Unmount the MTP device again.
+fusermount -u MTPMount
+rmdir MTPMount
+# Remove obscure IDs from filenames to make them easier to read.
+rename 's/\-[0-9A-Z]{32}//' *
+# Set the correct ownership for all transferred files.
+chown "$IMPORT_USER":"$IMPORT_USER" *
+# Lastly, move everything to the final directory and clean up:
+mv * "$IMPORT_PATH"
+cd ..
+rmdir "$TMP_PATH"
+echo "Finished."
+
+exit 0
