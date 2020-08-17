@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# sync-immersion - automatically transfers and randomizes immersion audio.
+# Copyright (C) 2020 Johannes Schirm
+
+# This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Requires ffprobe, rsync and find to be installed on the system.
+# This script assumes that the player plays files in FAT order!
+# It randomizes file order by "rewriting" the FAT table on the player.
+# In practice, this is done by moving files into and out of a subfolder.
+
+# Please make sure to adjust $IMMERSION_PATH and $IMMERSION_GENRES.
+# Provide all genres that are present in your immersion path.
+# This will allow you to keep other content on the player less formally.
+# (It will not be deleted and instead be randomly mixed with immersion!)
+# Create the $PROBE_FILE in the final (mounted) path of the player.
+# (Just run in the player's root: echo "" > .immersion-probe)
+# Finally, make sure that the executing user can write to $LOG_FILE!
+
+# You could have systemd run the script each time the player is mounted.
+# I use the following player which is minimal and ideal for immersion:
+# https://www.bertronic.de/elektronik/mp3-player/royal-mini/mini-royal-bc05/
+# However, there have been several reports of it breaking quite early.
+# If this happens to me, I will probably search for an open solution.
+# (Arduino or similar toolkits? FOSS firmware for customized actions!)
+
+# The host directory that should be searched for new immersion.
+IMMERSION_PATH='/home/johannes/Nextcloud/johannes/Immersion/!Condensed/'
+# ID3 genres that will be used to identify immersion on the player.
+# (Vs. "other" audio files, which the user can copy over manually!)
+IMMERSION_GENRES=(
+	'Immersion (Condensed)'
+)
+# Immersion files modified within this timespan are considered recent.
+# Recent immersion always comes (in find order) at the beginning.
+PRIO_DAYS=7
+# Maximum amount of subsequent other audio files after immersion.
+# (The main point is immersion! But set it to 0 for no limit.)
+MAX_OTHERS=1
+# Activation delay for avoiding syncs during shorter mounts.
+# Makes sense if the script is always run when the player is mounted.
+DELAY_MINS=5
+# The log file is only for keeping a record of the final file order.
+LOG_FILE='/var/log/sync-immersion.log'
+# The probe file defines the device root for synchronization.
+# Adjust it to wherever your immersion player is mounted.
+PROBE_FILE='/media/johannes/IMMERSION/.immersion-probe'
+
+function moveInPlace {
+	# Moves a number (argument 1) of randomly selected files.
+	# Source (argument 2) to target directory (argument 3).
+	# (Setting the number to -1 will move all contained files!)
+	# Writes the names of moved files to the log at $LOG_FILE.
+	# A prefix (argument 4) for logged file names is possible.
+	oldWD="$(pwd)"
+	source="$(realpath $2)"
+	target="$(realpath $3)"
+	cd "$source"
+	if [[ "$1" -eq -1 ]]
+	then
+		files=$(ls -1A ./ | shuf 2> /dev/null)
+	else
+		files=$(ls -1A ./ | shuf -n $1 2> /dev/null)
+	fi
+	local label=''
+	if [[ ! -z "$4" ]]
+	then
+		label="$(echo "$4" | tr -d '&\\/')"
+	fi
+	echo "$files" | sed "s/^/$label /" >> "$LOG_FILE"
+	IFS=$'\n';
+	for file in $files
+	do
+		mv "$file" "$target"
+	done
+	unset IFS
+	cd "$oldWD"
+}
+
+
+# Wait 5 minutes before trying to synchronize the player.
+# (This prevents syncs if the user is in a rush.)
+sleep $(( DELAY_MINS * 60 ))
+
+# Make sure this is actually the immersion player.
+if [[ -f "$PROBE_FILE" ]]
+then
+	cd "${PROBE_FILE%/*}/"
+else
+	echo "Immersion player probe not found at $PROBE_FILE."
+	exit 1
+fi
+
+# Separate all audio files with a matching ID3 genre into a subfolder.
+# With this, we can let rsync delete from the immersion player.
+# (Without deleting audio files that have been put there manually.)
+echo "Find audio files categorized as immersion..."
+mkdir immersion
+for file in *.mp3
+do
+	genre=$(ffprobe -v quiet -of default=noprint_wrappers=1:nokey=1 \
+		-show_entries format_tags=genre -i "$file")
+	if [[ ! -z "$genre" && "${IMMERSION_GENRES[@]}" =~ "$genre" ]]
+	then
+		mv "$file" ./immersion/
+	fi
+done
+# Perform the rsync with the source path on this computer.
+echo "Synchronize immersion audio files with source..."
+rsync -r --verbose --update --delete "$IMMERSION_PATH" ./immersion/
+# Now, also move all the other audio files into a subfolder.
+echo "Find audio files categorized as others..."
+mkdir other
+mv *.mp3 ./other/
+# Start a new section in the log file for the actual file order.
+echo "----------" >> "$LOG_FILE"
+date >> "$LOG_FILE"
+# Before the main sync starts, move very recent immersion in order.
+# (Listening to audio intensively when it is new is recommended.)
+cd immersion/
+PRIO_FILES=$(find *.mp3 -mtime -"$PRIO_DAYS" \
+	-exec mv {} ../ \; -print)
+PRIO_COUNT=$(echo "$PRIO_FILES" | wc -l)
+echo "$PRIO_FILES" | sed 's/^/[!Prio] [Immersion] /' >> "$LOG_FILE"
+echo "Prioritized $PRIO_COUNT recent immersion audio files."
+cd ../
+# To shuffle the playback order, just move random files by turns.
+# (The playback order of the audio is defined by the FAT table.)
+# Calculate the ratios of immersion and other audio files.
+iTotal=$(ls -1 immersion/ | wc -l)
+oTotal=$(ls -1 other/ | wc -l)
+iRatio=$(( oTotal > 0 ? iTotal / oTotal : iTotal ))
+iRatio=$(( iRatio > 1 ? iRatio : 1 ))
+oRatio=$(( iTotal > 0 ? oTotal / iTotal : oTotal ))
+oRatio=$(( oRatio > 1 ? oRatio : 1 ))
+if [[ "$MAX_OTHERS" > 0 && "$oRatio" > "$MAX_OTHERS" ]]
+then
+	echo "Capping ratio of others from $oRatio to $MAX_OTHERS."
+	oRatio=$MAX_OTHERS
+fi
+echo "Shuffle titles with $oRatio others on $iRatio immersion..."
+while [[ ! -z "$(ls -A immersion/)" || ! -z "$(ls -A other/)" ]]
+do
+	if [[ ! -z "$(ls -A immersion/)" ]]
+	then
+		# For each "round", first move the immersion files.
+		# Use the immersion ratio to determine how many.
+		moveInPlace $iRatio immersion/ . '[Immersion]'
+		if [[ ! -z "$(ls -A other/)" ]]
+		then
+			# Move as many other files as the ratio says.
+			moveInPlace $oRatio other/ . '[Other]'
+		fi
+	else
+		# All immersion is moved, move remaining others.
+		# (But still keep randomizing their order!)
+		moveInPlace -1 other/ . '[Other]'
+	fi
+done
+# Done! Remove the subfolders again.
+echo "Immersion player synchronized successfully."
+rmdir immersion other
+
+exit 0
