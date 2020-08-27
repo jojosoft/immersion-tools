@@ -125,9 +125,12 @@ date >> "$LOG_FILE"
 cd immersion/
 PRIO_FILES=$(find *.mp3 -mtime -"$PRIO_DAYS" \
 	-exec mv {} ../ \; -print)
-PRIO_COUNT=$(echo "$PRIO_FILES" | wc -l)
-echo "$PRIO_FILES" | sed 's/^/[!Prio] [Immersion] /' >> "$LOG_FILE"
-echo "Prioritized $PRIO_COUNT recent immersion audio files."
+if [[ ! -z "$PRIO_FILES" ]]
+then
+	PRIO_COUNT=$(echo "$PRIO_FILES" | wc -l)
+	echo "$PRIO_FILES" | sed 's/^/[!Prio] [Immersion] /' >> "$LOG_FILE"
+	echo "Prioritized $PRIO_COUNT recent immersion audio files."
+fi
 cd ../
 # To shuffle the playback order, just move random files by turns.
 # (The playback order of the audio is defined by the FAT table.)
