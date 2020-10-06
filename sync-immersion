@@ -60,26 +60,39 @@ function moveInPlace {
 	oldWD="$(pwd)"
 	source="$(realpath $2)"
 	target="$(realpath $3)"
-	cd "$source"
-	if [[ "$1" -eq -1 ]]
+	# Only move files after changing to the source directory.
+	# Also make sure that the target directory exists.
+	# This function should fail if any of these checks fail!
+	if cd "$source" && [[ -d "$target" ]]
 	then
-		files=$(ls -1A ./ | shuf 2> /dev/null)
+		if [[ "$1" -eq -1 ]]
+		then
+			# Get a shuffled list of all source files.
+			files=$(ls -1A ./ | shuf 2> /dev/null)
+		else
+			# Randomly select the given number of files.
+			files=$(ls -1A ./ | shuf -n $1 2> /dev/null)
+		fi
+		local label=''
+		if [[ ! -z "$4" ]]
+		then
+			# Escape the custom log label for sed.
+			label="$(echo "$4" | tr -d '&\\/')"
+		fi
+		echo "$files" | sed "s/^/$label /" >> "$LOG_FILE"
+		# Move all of the files determined above.
+		IFS=$'\n';
+		for file in $files
+		do
+			mv "$file" "$target"
+		done
+		unset IFS
+		# Change back to the original working directory!
+		cd "$oldWD"
 	else
-		files=$(ls -1A ./ | shuf -n $1 2> /dev/null)
+		# The files could not be moved.
+		return 1
 	fi
-	local label=''
-	if [[ ! -z "$4" ]]
-	then
-		label="$(echo "$4" | tr -d '&\\/')"
-	fi
-	echo "$files" | sed "s/^/$label /" >> "$LOG_FILE"
-	IFS=$'\n';
-	for file in $files
-	do
-		mv "$file" "$target"
-	done
-	unset IFS
-	cd "$oldWD"
 }
 
 
@@ -154,15 +167,24 @@ do
 		# For each "round", first move the immersion files.
 		# Use the immersion ratio to determine how many.
 		moveInPlace $iRatio immersion/ . '[Immersion]'
-		if [[ ! -z "$(ls -A other/)" ]]
+		exitCode=$?
+		if [[ "$exitCode" -eq 0 && ! -z "$(ls -A other/)" ]]
 		then
 			# Move as many other files as the ratio says.
 			moveInPlace $oRatio other/ . '[Other]'
+			exitCode=$?
 		fi
 	else
 		# All immersion is moved, move remaining others.
 		# (But still keep randomizing their order!)
 		moveInPlace -1 other/ . '[Other]'
+		exitCode=$?
+	fi
+	# Abort on errors to prevent infinite loops!
+	if [[ ! "$exitCode" -eq 0 ]]
+	then
+		echo "Errors occurred while shuffling files, exiting!"
+		exit 1
 	fi
 done
 # Done! Remove the subfolders again.
