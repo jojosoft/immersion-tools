@@ -109,6 +109,15 @@ else
 	exit 1
 fi
 
+# Clean up any syncs that failed midway or left an unclean state.
+# Just move all files to the root again and remove the special folders.
+if [[ -d "./immersion/" || -d "./other/" ]]
+then
+	echo "Correcting unclean file system state on immersion player..."
+	mv ./{immersion,other}/* . 2> /dev/null
+	rm -R immersion other
+fi
+
 # Separate all audio files with a matching ID3 genre into a subfolder.
 # With this, we can let rsync delete from the immersion player.
 # (Without deleting audio files that have been put there manually.)
