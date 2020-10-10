@@ -134,7 +134,7 @@ do
 done
 # Perform the rsync with the source path on this computer.
 echo "Synchronize immersion audio files with source..."
-rsync -rv --times --update --delete "$IMMERSION_PATH" ./immersion/
+rsync -rv --times -@1 --update --delete "$IMMERSION_PATH" ./immersion/
 # Now, also move all the other audio files into a subfolder.
 echo "Find audio files categorized as others..."
 mkdir other
