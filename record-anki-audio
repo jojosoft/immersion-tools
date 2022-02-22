@@ -25,6 +25,8 @@
 # PulseAudio should now always provide the desired source to sox.
 # If you are not using PulseAudio, specifiy the desired ALSA device.
 # (You will have to look up the syntax of the rec command to do this.)
+# Uncomment PA_SINK if you often use Bluetooth devices or other sinks.
+# This will select the "most recent" output sink monitor automatically.
 
 # The minimum required length of a recording in milliseconds.
 # Stopping the recording will not possible before this time passed.
@@ -36,6 +38,18 @@ COLLECTION='/home/johannes/.local/share/Anki2/日本語/collection.media/'
 TMP_AUDIO='/tmp/ankiAudioRecording.mp3'
 TMP_PID='/tmp/ankiAudioRecordingPID'
 TMP_TIME='/tmp/ankiAudioRecordingStartTime'
+
+# Find the current audio sink that normal system audio will be sent to by default.
+# No way to get default output sink: https://brokkr.net/2018/05/24/down-the-drain-the-elusive-default-pulseaudio-sink/
+# More information: https://wiki.archlinux.org/title/PulseAudio/Examples#Set_the_default_output_sink
+# However, suppose VLC starts and plays audio while Bluetooth headphones are connected:
+# The "correct" (currently connected) output sink will be automatically chosen!
+# WORKAROUND USED HERE: The "most recent" monitor will be selected and used explicitly.
+# (!) Note that for this to work, libsox-fmt-pulse needs to be installed..!
+# The output of pacmd list-sources is expected to be sorted by sink creation date.
+# This will naturally prefer "later" (alternative) output sinks over the integrated sound card one's.
+# TODO: Still, this does only cover very basic situations, find a way to actually get the current default output sink.
+#PA_SINK=$(pacmd list-sources | grep 'name:' | grep '.monitor>' | cut -d" " -f2 | tr -d '<|>' | tail -n 1)
 
 function getTimeMs {
 	# Returns the milliseconds since the start of the UNIX epoch.
@@ -118,7 +132,15 @@ else
 	# Start the recording and store the PID:
 	# (ffmpeg + pulse doesn't work any more! Only sox with configured default in pavucontrol survives reboot.)
 	#ffmpeg -y -f pulse -i alsa_output.pci-0000_00_1b.0.analog-stereo.monitor -b:a 128k "$TMP_AUDIO" &
-	rec -c 2 -r 44100 "$TMP_AUDIO" &
+	# However, suppose a Bluetooth headset is connected, silence from the old, internal sink will be recorded.
+	# (Without further parameters, sox records the last sink that has been selected for it in pavucontrol.)
+	# To switch to the headset monitor while it is connected, uncomment PA_SINK (and install libsox-fmt-pulse).
+	if [[ -z "$PA_SINK" ]]
+	then
+		rec -c 2 -r 44100 "$TMP_AUDIO" &
+	else
+		sox -t pulseaudio "$PA_SINK" -c 2 -r 44100 "$TMP_AUDIO" &
+	fi
 	echo $! > "$TMP_PID"
 	# Save the start time of this recording. The file creation date might be not precise enough.
 	getTimeMs > "$TMP_TIME"
